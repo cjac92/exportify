@@ -10,7 +10,7 @@ window.Helpers = {
     window.location = "https://accounts.spotify.com/authorize" +
       "?client_id=" + client_id +
       "&redirect_uri=" + encodeURIComponent([location.protocol, '//', location.host, location.pathname].join('')) +
-      "&scope=playlist-read-private%20playlist-read-collaborative" +
+      "&scope=playlist-read-private%20playlist-read-collaborative%20user-library-read" +
       "&response_type=token";
   },
 
@@ -55,18 +55,62 @@ var PlaylistTable = React.createClass({
 
   loadPlaylists: function(url) {
     var userId = '';
+    var firstPage = typeof url === 'undefined' || url.indexOf('offset=0') > -1;
 
     window.Helpers.apiCall("https://api.spotify.com/v1/me", this.props.access_token).then(function(response) {
       userId = response.id;
 
-      return window.Helpers.apiCall(
-        typeof url !== 'undefined' ? url : "https://api.spotify.com/v1/users/" + userId + "/playlists",
-        this.props.access_token
-      )
-    }.bind(this)).done(function(response) {
+      // Show liked tracks playlist if viewing first page
+      if (firstPage) {
+        return $.when.apply($, [
+          window.Helpers.apiCall(
+            "https://api.spotify.com/v1/users/" + userId + "/tracks",
+            this.props.access_token
+          ),
+          window.Helpers.apiCall(
+            "https://api.spotify.com/v1/users/" + userId + "/playlists",
+            this.props.access_token
+          )
+        ])
+      } else {
+        return window.Helpers.apiCall(url, this.props.access_token);
+      }
+    }.bind(this)).done(function() {
+      var response;
+      var playlists = [];
+
+      if (arguments[1] === 'success') {
+        response = arguments[0];
+        playlists = arguments[0].items;
+      } else {
+        response = arguments[1][0];
+        playlists = arguments[1][0].items;
+      }
+
+      // Show library of saved tracks if viewing first page
+      if (firstPage) {
+        playlists.unshift({
+          "id": "liked",
+          "name": "Liked",
+          "public": false,
+          "collaborative": false,
+          "owner": {
+            "id": userId,
+            "display_name": userId,
+            "uri": "spotify:user:" + userId
+          },
+          "tracks": {
+            "href": "https://api.spotify.com/v1/me/tracks",
+            "limit": arguments[0][0].limit,
+            "total": arguments[0][0].total
+          },
+          "uri": "spotify:user:" + userId + ":saved"
+        });
+      }
+
       if (this.isMounted()) {
         this.setState({
-          playlists: response.items,
+          playlists: playlists,
           playlistCount: response.total,
           nextURL: response.next,
           prevURL: response.previous
@@ -131,6 +175,14 @@ var PlaylistRow = React.createClass({
     }
   },
 
+  renderIcon: function(playlist) {
+    if (playlist.name == 'Liked') {
+      return <i className="glyphicon glyphicon-heart" style={{ color: 'red' }}></i>;
+    } else {
+      return <i className="fa fa-music"></i>;
+    }
+  },
+
   render: function() {
     playlist = this.props.playlist
     if(playlist.uri==null) return (
@@ -145,7 +197,7 @@ var PlaylistRow = React.createClass({
     );
     return (
       <tr key={this.props.key}>
-        <td><i className="fa fa-music"></i></td>
+        <td>{this.renderIcon(playlist)}</td>
         <td><a href={playlist.uri}>{playlist.name}</a></td>
         <td><a href={playlist.owner.uri}>{playlist.owner.display_name}</a></td>
         <td>{playlist.tracks.total}</td>
@@ -204,11 +256,20 @@ var PlaylistsExporter = {
     var playlistFileNames = [];
 
     window.Helpers.apiCall("https://api.spotify.com/v1/me", access_token).then(function(response) {
-      var requests = [];
       var limit = 20;
+      var userId = response.id;
 
+      // Initialize requests with starred playlist
+      var requests = [
+        window.Helpers.apiCall(
+          "https://api.spotify.com/v1/users/" + userId + "/starred",
+          access_token
+        )
+      ];
+
+      // Add other playlists
       for (var offset = 0; offset < playlistCount; offset = offset + limit) {
-        var url = "https://api.spotify.com/v1/users/" + response.id + "/playlists";
+        var url = "https://api.spotify.com/v1/users/" + userId + "/playlists";
         requests.push(
           window.Helpers.apiCall(url + '?offset=' + offset + '&limit=' + limit, access_token)
         )
@@ -220,10 +281,29 @@ var PlaylistsExporter = {
 
         // Handle either single or multiple responses
         if (typeof arguments[0].href == 'undefined') {
-          $(arguments).each(function(i, response) { $.merge(playlists, response[0].items) })
+          $(arguments).each(function(i, response) {
+            if (typeof response[0].items === 'undefined') {
+              // Single playlist
+              playlists.push(response[0]);
+            } else {
+              // Page of playlists
+              $.merge(playlists, response[0].items);
+            }
+          })
         } else {
           playlists = arguments[0].items
         }
+
+        // Add library of saved tracks
+        playlists.unshift({
+          "id": "saved",
+          "name": "Saved",
+          "tracks": {
+            "href": "https://api.spotify.com/v1/me/tracks",
+            "limit": 50,
+            "total": 2500 // TODO: get rid of hard-coded library size
+          },
+        });
 
         $(playlists).each(function(i, playlist) {
           playlistFileNames.push(PlaylistExporter.fileName(playlist));
@@ -257,11 +337,11 @@ var PlaylistExporter = {
 
   csvData: function(access_token, playlist) {
     var requests = [];
-    var limit = 100;
+    var limit = playlist.tracks.limit || 100;
 
     for (var offset = 0; offset < playlist.tracks.total; offset = offset + limit) {
       requests.push(
-        window.Helpers.apiCall(playlist.tracks.href + '?offset=' + offset + '&limit=' + limit, access_token)
+        window.Helpers.apiCall(playlist.tracks.href.split('?')[0] + '?offset=' + offset + '&limit=' + limit, access_token)
       )
     }
 
